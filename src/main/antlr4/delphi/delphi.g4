@@ -34,15 +34,15 @@ declarationPart
 
 classType
     : CLASS (LPAREN identifierList RPAREN)? classBody END
-    | CLASS (LPAREN identifierList RPAREN)?   // forward declaration
+    | CLASS (LPAREN identifierList RPAREN)?
     ;
 
 classBody
-    : (classSection)*
+    : classSection*
     ;
 
 classSection
-    : (visibilitySpecifier)? classMemberList
+    : visibilitySpecifier? classMemberList
     ;
 
 visibilitySpecifier
@@ -75,7 +75,6 @@ methodDirective
     : VIRTUAL
     | OVERRIDE
     | ABSTRACT
-    | OVERRIDE
     ;
 
 constructorDeclaration
@@ -108,10 +107,8 @@ constantDefinition
     ;
 
 constant
-    : unsignedNumber
-    | sign unsignedNumber
-    | identifier
-    | sign identifier
+    : sign? unsignedNumber
+    | sign? identifier
     | string
     | constantChr
     ;
@@ -314,31 +311,35 @@ statement
     |
     ;
 
+// simpleStatement: parse a full designator chain, then optionally := expr
+// Using a single rule body avoids labeled-alternative ANTLR restrictions.
 simpleStatement
-    : assignmentStatement
-    | procedureStatement
-    | gotoStatement
-    | emptyStatement_
+    : designator ASSIGN expression
+    | designator
+    | GOTO label
     ;
 
-assignmentStatement
-    : variable ASSIGN expression
+// ----------------------------------------------------------------
+// Designator: unified left-hand-side / expression chain
+//   covers: variables, field access, array index, calls,
+//           ClassName.Create(args), obj.Free, WriteLn(args), etc.
+// ----------------------------------------------------------------
+designator
+    : primary designatorSuffix*
     ;
 
-variable
-    : (AT identifier | identifier) (LBRACKET expression (COMMA expression)* RBRACKET | DOT identifier | POINTER)*
+primary
+    : AT identifier
+    | identifier
     ;
 
-procedureStatement
-    : identifier (LPAREN parameterList RPAREN)?
-    ;
-
-gotoStatement
-    : GOTO label
-    ;
-
-emptyStatement_
-    :
+// Each suffix extends the chain to the right.
+// No labeled alternatives here — visitor uses instanceof checks.
+designatorSuffix
+    : DOT identifier
+    | LPAREN parameterList? RPAREN
+    | LBRACKET expression (COMMA expression)* RBRACKET
+    | POINTER
     ;
 
 structuredStatement
@@ -401,7 +402,7 @@ withStatement
     ;
 
 recordVariableList
-    : variable (COMMA variable)*
+    : designator (COMMA designator)*
     ;
 
 tryStatement
@@ -444,7 +445,7 @@ relationalOperator
     ;
 
 simpleExpression
-    : (sign)? term (additiveOperator term)*
+    : sign? term (additiveOperator term)*
     ;
 
 additiveOperator
@@ -469,24 +470,18 @@ multiplicativeOperator
     ;
 
 signedFactor
-    : (sign)? factor
+    : sign? factor
     ;
 
+// factor: designator handles variables, calls, field access, object creation.
 factor
-    : variable
-    | LPAREN expression RPAREN
-    | functionDesignator
-    | unsignedConstant
-    | set_
+    : LPAREN expression RPAREN
     | NOT factor
     | bool_
     | NIL
-    | objectCreation
-    ;
-
-objectCreation
-    : identifier DOT CREATE (LPAREN parameterList RPAREN)?
-    | NEW identifier (LPAREN parameterList RPAREN)?
+    | unsignedConstant
+    | set_
+    | designator
     ;
 
 bool_
@@ -494,14 +489,9 @@ bool_
     | FALSE
     ;
 
-functionDesignator
-    : identifier LPAREN parameterList RPAREN
-    ;
-
 unsignedConstant
     : unsignedNumber
     | string
-    | NIL
     ;
 
 set_
@@ -548,13 +538,17 @@ string
     : STRING_LITERAL
     ;
 
+// ============================================================
+// identifier — soft keywords usable as names
+// ============================================================
+
 identifier
     : IDENT
     | RESULT
     | SELF
     | CREATE
-    | FREE
     | DESTROY
+    | FREE
     | VIRTUAL
     | OVERRIDE
     | ABSTRACT
@@ -573,121 +567,118 @@ identifier
     | SHR
     | WRITELN
     | WRITE
+    | NEW
     ;
 
 // ============================================================
 // LEXER RULES
 // ============================================================
 
-// Keywords
-AND         : [Aa][Nn][Dd];
-ARRAY       : [Aa][Rr][Rr][Aa][Yy];
-ABSTRACT    : [Aa][Bb][Ss][Tt][Rr][Aa][Cc][Tt];
-AS          : [Aa][Ss];
-AT          : '@';
-BEGIN       : [Bb][Ee][Gg][Ii][Nn];
-BOOLEAN     : [Bb][Oo][Oo][Ll][Ee][Aa][Nn];
-CASE        : [Cc][Aa][Ss][Ee];
-CHAR        : [Cc][Hh][Aa][Rr];
-CHR         : [Cc][Hh][Rr];
-CLASS       : [Cc][Ll][Aa][Ss][Ss];
-CONST       : [Cc][Oo][Nn][Ss][Tt];
-CONSTRUCTOR : [Cc][Oo][Nn][Ss][Tt][Rr][Uu][Cc][Tt][Oo][Rr];
-CREATE      : [Cc][Rr][Ee][Aa][Tt][Ee];
-DESTRUCTOR  : [Dd][Ee][Ss][Tt][Rr][Uu][Cc][Tt][Oo][Rr];
-DIV         : [Dd][Ii][Vv];
-DO          : [Dd][Oo];
-DOWNTO      : [Dd][Oo][Ww][Nn][Tt][Oo];
-ELSE        : [Ee][Ll][Ss][Ee];
-END         : [Ee][Nn][Dd];
-EXCEPT      : [Ee][Xx][Cc][Ee][Pp][Tt];
-FALSE       : [Ff][Aa][Ll][Ss][Ee];
-FILE        : [Ff][Ii][Ll][Ee];
-FINALLY     : [Ff][Ii][Nn][Aa][Ll][Ll][Yy];
-FOR         : [Ff][Oo][Rr];
-FREE        : [Ff][Rr][Ee][Ee];
-FUNCTION    : [Ff][Uu][Nn][Cc][Tt][Ii][Oo][Nn];
-GOTO        : [Gg][Oo][Tt][Oo];
-IF          : [Ii][Ff];
+AND            : [Aa][Nn][Dd];
+ARRAY          : [Aa][Rr][Rr][Aa][Yy];
+ABSTRACT       : [Aa][Bb][Ss][Tt][Rr][Aa][Cc][Tt];
+AS             : [Aa][Ss];
+AT             : '@';
+BEGIN          : [Bb][Ee][Gg][Ii][Nn];
+BOOLEAN        : [Bb][Oo][Oo][Ll][Ee][Aa][Nn];
+CASE           : [Cc][Aa][Ss][Ee];
+CHAR           : [Cc][Hh][Aa][Rr];
+CHR            : [Cc][Hh][Rr];
+CLASS          : [Cc][Ll][Aa][Ss][Ss];
+CONST          : [Cc][Oo][Nn][Ss][Tt];
+CONSTRUCTOR    : [Cc][Oo][Nn][Ss][Tt][Rr][Uu][Cc][Tt][Oo][Rr];
+CREATE         : [Cc][Rr][Ee][Aa][Tt][Ee];
+DESTROY        : [Dd][Ee][Ss][Tt][Rr][Oo][Yy];
+DESTRUCTOR     : [Dd][Ee][Ss][Tt][Rr][Uu][Cc][Tt][Oo][Rr];
+DIV            : [Dd][Ii][Vv];
+DO             : [Dd][Oo];
+DOWNTO         : [Dd][Oo][Ww][Nn][Tt][Oo];
+ELSE           : [Ee][Ll][Ss][Ee];
+END            : [Ee][Nn][Dd];
+EXCEPT         : [Ee][Xx][Cc][Ee][Pp][Tt];
+FALSE          : [Ff][Aa][Ll][Ss][Ee];
+FILE           : [Ff][Ii][Ll][Ee];
+FINALLY        : [Ff][Ii][Nn][Aa][Ll][Ll][Yy];
+FOR            : [Ff][Oo][Rr];
+FREE           : [Ff][Rr][Ee][Ee];
+FUNCTION       : [Ff][Uu][Nn][Cc][Tt][Ii][Oo][Nn];
+GOTO           : [Gg][Oo][Tt][Oo];
+IF             : [Ii][Ff];
 IMPLEMENTATION : [Ii][Mm][Pp][Ll][Ee][Mm][Ee][Nn][Tt][Aa][Tt][Ii][Oo][Nn];
-IN          : [Ii][Nn];
-INHERITED   : [Ii][Nn][Hh][Ee][Rr][Ii][Tt][Ee][Dd];
-INTEGER     : [Ii][Nn][Tt][Ee][Gg][Ee][Rr];
-INTERFACE   : [Ii][Nn][Tt][Ee][Rr][Ff][Aa][Cc][Ee];
-IS          : [Ii][Ss];
-LABEL       : [Ll][Aa][Bb][Ee][Ll];
-MOD         : [Mm][Oo][Dd];
-NEW         : [Nn][Ee][Ww];
-NIL         : [Nn][Ii][Ll];
-NOT         : [Nn][Oo][Tt];
-OF          : [Oo][Ff];
-OR          : [Oo][Rr];
-OVERRIDE    : [Oo][Vv][Ee][Rr][Rr][Ii][Dd][Ee];
-PACKED      : [Pp][Aa][Cc][Kk][Ee][Dd];
-POINTER     : '^';
-PRIVATE     : [Pp][Rr][Ii][Vv][Aa][Tt][Ee];
-PROCEDURE   : [Pp][Rr][Oo][Cc][Ee][Dd][Uu][Rr][Ee];
-PROGRAM     : [Pp][Rr][Oo][Gg][Rr][Aa][Mm];
-PROTECTED   : [Pp][Rr][Oo][Tt][Ee][Cc][Tt][Ee][Dd];
-PUBLIC      : [Pp][Uu][Bb][Ll][Ii][Cc];
-PUBLISHED   : [Pp][Uu][Bb][Ll][Ii][Ss][Hh][Ee][Dd];
-REAL        : [Rr][Ee][Aa][Ll];
-RECORD      : [Rr][Ee][Cc][Oo][Rr][Dd];
-REPEAT      : [Rr][Ee][Pp][Ee][Aa][Tt];
-RESULT      : [Rr][Ee][Ss][Uu][Ll][Tt];
-SELF        : [Ss][Ee][Ll][Ff];
-SET         : [Ss][Ee][Tt];
-SHL         : [Ss][Hh][Ll];
-SHR         : [Ss][Hh][Rr];
-STRING      : [Ss][Tt][Rr][Ii][Nn][Gg];
-THEN        : [Tt][Hh][Ee][Nn];
-TO          : [Tt][Oo];
-TRUE        : [Tt][Rr][Uu][Ee];
-TRY         : [Tt][Rr][Yy];
-TYPE        : [Tt][Yy][Pp][Ee];
-UNIT        : [Uu][Nn][Ii][Tt];
-UNTIL       : [Uu][Nn][Tt][Ii][Ll];
-USES        : [Uu][Ss][Ee][Ss];
-VAR         : [Vv][Aa][Rr];
-VIRTUAL     : [Vv][Ii][Rr][Tt][Uu][Aa][Ll];
-WHILE       : [Ww][Hh][Ii][Ll][Ee];
-WITH        : [Ww][Ii][Tt][Hh];
-WRITELN     : [Ww][Rr][Ii][Tt][Ee][Ll][Nn];
-WRITE       : [Ww][Rr][Ii][Tt][Ee];
-XOR         : [Xx][Oo][Rr];
+IN             : [Ii][Nn];
+INHERITED      : [Ii][Nn][Hh][Ee][Rr][Ii][Tt][Ee][Dd];
+INTEGER        : [Ii][Nn][Tt][Ee][Gg][Ee][Rr];
+INTERFACE      : [Ii][Nn][Tt][Ee][Rr][Ff][Aa][Cc][Ee];
+IS             : [Ii][Ss];
+LABEL          : [Ll][Aa][Bb][Ee][Ll];
+MOD            : [Mm][Oo][Dd];
+NEW            : [Nn][Ee][Ww];
+NIL            : [Nn][Ii][Ll];
+NOT            : [Nn][Oo][Tt];
+OF             : [Oo][Ff];
+OR             : [Oo][Rr];
+OVERRIDE       : [Oo][Vv][Ee][Rr][Rr][Ii][Dd][Ee];
+PACKED         : [Pp][Aa][Cc][Kk][Ee][Dd];
+POINTER        : '^';
+PRIVATE        : [Pp][Rr][Ii][Vv][Aa][Tt][Ee];
+PROCEDURE      : [Pp][Rr][Oo][Cc][Ee][Dd][Uu][Rr][Ee];
+PROGRAM        : [Pp][Rr][Oo][Gg][Rr][Aa][Mm];
+PROTECTED      : [Pp][Rr][Oo][Tt][Ee][Cc][Tt][Ee][Dd];
+PUBLIC         : [Pp][Uu][Bb][Ll][Ii][Cc];
+PUBLISHED      : [Pp][Uu][Bb][Ll][Ii][Ss][Hh][Ee][Dd];
+REAL           : [Rr][Ee][Aa][Ll];
+RECORD         : [Rr][Ee][Cc][Oo][Rr][Dd];
+REPEAT         : [Rr][Ee][Pp][Ee][Aa][Tt];
+RESULT         : [Rr][Ee][Ss][Uu][Ll][Tt];
+SELF           : [Ss][Ee][Ll][Ff];
+SET            : [Ss][Ee][Tt];
+SHL            : [Ss][Hh][Ll];
+SHR            : [Ss][Hh][Rr];
+STRING         : [Ss][Tt][Rr][Ii][Nn][Gg];
+THEN           : [Tt][Hh][Ee][Nn];
+TO             : [Tt][Oo];
+TRUE           : [Tt][Rr][Uu][Ee];
+TRY            : [Tt][Rr][Yy];
+TYPE           : [Tt][Yy][Pp][Ee];
+UNIT           : [Uu][Nn][Ii][Tt];
+UNTIL          : [Uu][Nn][Tt][Ii][Ll];
+USES           : [Uu][Ss][Ee][Ss];
+VAR            : [Vv][Aa][Rr];
+VIRTUAL        : [Vv][Ii][Rr][Tt][Uu][Aa][Ll];
+WHILE          : [Ww][Hh][Ii][Ll][Ee];
+WITH           : [Ww][Ii][Tt][Hh];
+WRITELN        : [Ww][Rr][Ii][Tt][Ee][Ll][Nn];
+WRITE          : [Ww][Rr][Ii][Tt][Ee];
+XOR            : [Xx][Oo][Rr];
 
-// Symbols
-ASSIGN      : ':=';
-PLUS        : '+';
-MINUS       : '-';
-STAR        : '*';
-SLASH       : '/';
-EQUALS      : '=';
-NOT_EQUALS  : '<>';
-LT          : '<';
-LE          : '<=';
-GE          : '>=';
-GT          : '>';
-LPAREN      : '(';
-RPAREN      : ')';
-LBRACKET    : '[';
-RBRACKET    : ']';
-COLON       : ':';
-SEMI        : ';';
-COMMA       : ',';
-DOT         : '.';
-DOTDOT      : '..';
+ASSIGN         : ':=';
+PLUS           : '+';
+MINUS          : '-';
+STAR           : '*';
+SLASH          : '/';
+EQUALS         : '=';
+NOT_EQUALS     : '<>';
+LT             : '<';
+LE             : '<=';
+GE             : '>=';
+GT             : '>';
+LPAREN         : '(';
+RPAREN         : ')';
+LBRACKET       : '[';
+RBRACKET       : ']';
+COLON          : ':';
+SEMI           : ';';
+COMMA          : ',';
+DOT            : '.';
+DOTDOT         : '..';
 
-// Literals
-NUM_INT     : [0-9]+;
-NUM_REAL    : [0-9]+ '.' [0-9]+ ([eE] [+-]? [0-9]+)?;
+NUM_INT        : [0-9]+;
+NUM_REAL       : [0-9]+ '.' [0-9]+ ([eE] [+-]? [0-9]+)?;
 STRING_LITERAL : '\'' (~'\'' | '\'\'')* '\'';
 
-// Identifiers
-IDENT       : [a-zA-Z_] [a-zA-Z0-9_]*;
+IDENT : [a-zA-Z_] [a-zA-Z0-9_]*;
 
-// Whitespace / Comments
-WS          : [ \t\r\n]+ -> skip;
-COMMENT1    : '{' .*? '}' -> skip;
-COMMENT2    : '(*' .*? '*)' -> skip;
-COMMENT3    : '//' ~[\r\n]* -> skip;
+WS       : [ \t\r\n]+    -> skip;
+COMMENT1 : '{' .*? '}'   -> skip;
+COMMENT2 : '(*' .*? '*)' -> skip;
+COMMENT3 : '//' ~[\r\n]* -> skip;

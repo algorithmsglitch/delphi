@@ -5,7 +5,6 @@ import java.util.*;
 
 /**
  * Tree-walking interpreter for the Delphi subset grammar.
- * Walks the ANTLR ParseTree produced by delphiParser and evaluates it.
  */
 public class DelphiVisitor extends delphiBaseVisitor<Object> {
 
@@ -13,56 +12,31 @@ public class DelphiVisitor extends delphiBaseVisitor<Object> {
     // Global state
     // ----------------------------------------------------------------
 
-    /** Class registry */
     private final Map<String, ClassDefinition> classes = new LinkedHashMap<>();
-
-    /** Interface registry */
     private final Map<String, List<String>> interfaces = new LinkedHashMap<>();
+    private final Map<String, delphiParser.ProcedureOrFunctionDeclarationContext> functions
+            = new LinkedHashMap<>();
 
-    /** Global procedure/function registry */
-    private final Map<String, delphiParser.ProcedureOrFunctionDeclarationContext> functions = new LinkedHashMap<>();
-
-    /** Global environment */
     private Environment globalEnv = new Environment();
-
-    /** Current environment (changes as we enter/exit scopes) */
     private Environment currentEnv = globalEnv;
 
-    // ----------------------------------------------------------------
-    // Helper: push/pop scope
-    // ----------------------------------------------------------------
-
-    private Environment pushScope() {
-        Environment child = new Environment(currentEnv);
-        currentEnv = child;
-        return child;
-    }
-
-    private void popScope(Environment saved) {
-        currentEnv = saved;
-    }
+    /** Sentinel: returned by callBuiltin when the name is not a built-in */
+    private static final Object UNRESOLVED = new Object();
 
     // ================================================================
-    // PROGRAM
+    // PROGRAM / BLOCK
     // ================================================================
 
     @Override
     public Object visitProgram(delphiParser.ProgramContext ctx) {
-        // First pass: collect all class and function declarations from blocks
         visit(ctx.block());
         return null;
     }
 
     @Override
     public Object visitBlock(delphiParser.BlockContext ctx) {
-        // First pass: register all declarations
-        for (delphiParser.DeclarationPartContext dp : ctx.declarationPart()) {
-            visit(dp);
-        }
-        // Second pass: execute the compound statement
-        if (ctx.compoundStatement() != null) {
-            visit(ctx.compoundStatement());
-        }
+        for (delphiParser.DeclarationPartContext dp : ctx.declarationPart()) visit(dp);
+        if (ctx.compoundStatement() != null) visit(ctx.compoundStatement());
         return null;
     }
 
@@ -71,61 +45,47 @@ public class DelphiVisitor extends delphiBaseVisitor<Object> {
         return visitChildren(ctx);
     }
 
+    // ================================================================
+    // TYPE DEFINITIONS
+    // ================================================================
+
     @Override
     public Object visitTypeDefinitionPart(delphiParser.TypeDefinitionPartContext ctx) {
-        for (delphiParser.TypeDefinitionContext td : ctx.typeDefinition()) {
-            visit(td);
-        }
+        for (delphiParser.TypeDefinitionContext td : ctx.typeDefinition()) visit(td);
         return null;
     }
 
     @Override
     public Object visitTypeDefinition(delphiParser.TypeDefinitionContext ctx) {
         String typeName = ctx.identifier().getText();
-        if (ctx.classType() != null) {
-            // It's a class definition
-            registerClassType(typeName, ctx.classType());
-        } else if (ctx.interfaceType() != null) {
-            // It's an interface definition — register interface name
-            interfaces.put(typeName.toLowerCase(), new ArrayList<>());
-        }
-        // Plain type aliases etc. — no action needed for interpreter
+        if (ctx.classType() != null)          registerClassType(typeName, ctx.classType());
+        else if (ctx.interfaceType() != null) interfaces.put(typeName.toLowerCase(), new ArrayList<>());
         return null;
     }
 
     private void registerClassType(String className, delphiParser.ClassTypeContext ctc) {
         ClassDefinition classDef = new ClassDefinition(className);
 
-        // Parse parent class / implemented interfaces from the identifier list
         if (ctc.identifierList() != null) {
             for (delphiParser.IdentifierContext pid : ctc.identifierList().identifier()) {
-                String parentName = pid.getText();
-                ClassDefinition parent = classes.get(parentName.toLowerCase());
-                if (parent != null) {
-                    classDef.setParentClass(parent);
-                } else {
-                    // Assume it's an interface
-                    classDef.addInterface(parentName);
-                }
+                String pn = pid.getText();
+                ClassDefinition parent = classes.get(pn.toLowerCase());
+                if (parent != null) classDef.setParentClass(parent);
+                else classDef.addInterface(pn);
             }
         }
 
-        // Parse class body sections
         if (ctc.classBody() != null) {
-            ClassDefinition.Visibility currentVis = ClassDefinition.Visibility.PUBLIC;
+            ClassDefinition.Visibility vis = ClassDefinition.Visibility.PUBLIC;
             for (delphiParser.ClassSectionContext sec : ctc.classBody().classSection()) {
-                if (sec.visibilitySpecifier() != null) {
-                    String visText = sec.visibilitySpecifier().getText().toUpperCase();
-                    currentVis = ClassDefinition.Visibility.valueOf(visText);
-                }
-                if (sec.classMemberList() != null) {
-                    for (delphiParser.ClassMemberContext mem : sec.classMemberList().classMember()) {
-                        registerClassMember(classDef, mem, currentVis);
-                    }
-                }
+                if (sec.visibilitySpecifier() != null)
+                    vis = ClassDefinition.Visibility.valueOf(
+                            sec.visibilitySpecifier().getText().toUpperCase());
+                if (sec.classMemberList() != null)
+                    for (delphiParser.ClassMemberContext mem : sec.classMemberList().classMember())
+                        registerClassMember(classDef, mem, vis);
             }
         }
-
         classes.put(className.toLowerCase(), classDef);
     }
 
@@ -135,43 +95,41 @@ public class DelphiVisitor extends delphiBaseVisitor<Object> {
         if (mem.fieldDeclaration() != null) {
             delphiParser.FieldDeclarationContext fd = mem.fieldDeclaration();
             String typeName = fd.typeIdentifier().getText();
-            for (delphiParser.IdentifierContext id : fd.identifierList().identifier()) {
+            for (delphiParser.IdentifierContext id : fd.identifierList().identifier())
                 classDef.addField(new ClassDefinition.FieldInfo(id.getText(), typeName, vis));
-            }
+
         } else if (mem.methodDeclaration() != null) {
             delphiParser.MethodDeclarationContext md = mem.methodDeclaration();
-            String mName = md.identifier().getText();
             String retType = md.typeIdentifier() != null ? md.typeIdentifier().getText() : null;
             List<ClassDefinition.ParameterInfo> params = parseParamList(md.formalParameterList());
             boolean isVirtual = false, isOverride = false, isAbstract = false;
             for (delphiParser.MethodDirectiveContext dir : md.methodDirective()) {
                 String d = dir.getText().toLowerCase();
-                if (d.equals("virtual")) isVirtual = true;
+                if (d.equals("virtual"))  isVirtual  = true;
                 if (d.equals("override")) isOverride = true;
                 if (d.equals("abstract")) isAbstract = true;
             }
-            ClassDefinition.MethodInfo mi = new ClassDefinition.MethodInfo(mName, params, retType, vis, null, classDef.getName());
-            mi.isVirtual = isVirtual;
-            mi.isOverride = isOverride;
-            mi.isAbstract = isAbstract;
+            ClassDefinition.MethodInfo mi = new ClassDefinition.MethodInfo(
+                    md.identifier().getText(), params, retType, vis, null, classDef.getName());
+            mi.isVirtual = isVirtual; mi.isOverride = isOverride; mi.isAbstract = isAbstract;
             classDef.addMethod(mi);
+
         } else if (mem.constructorDeclaration() != null) {
             delphiParser.ConstructorDeclarationContext cd = mem.constructorDeclaration();
-            String cName = cd.identifier().getText();
-            List<ClassDefinition.ParameterInfo> params = parseParamList(cd.formalParameterList());
-            ClassDefinition.MethodInfo mi = new ClassDefinition.MethodInfo(cName, params, null, vis, null, classDef.getName());
-            classDef.setConstructor(mi);
+            classDef.setConstructor(new ClassDefinition.MethodInfo(
+                    cd.identifier().getText(), parseParamList(cd.formalParameterList()),
+                    null, vis, null, classDef.getName()));
+
         } else if (mem.destructorDeclaration() != null) {
             delphiParser.DestructorDeclarationContext dd = mem.destructorDeclaration();
-            String dName = dd.identifier().getText();
-            List<ClassDefinition.ParameterInfo> params = new ArrayList<>();
-            ClassDefinition.MethodInfo mi = new ClassDefinition.MethodInfo(dName, params, null, vis, null, classDef.getName());
-            classDef.setDestructor(mi);
+            classDef.setDestructor(new ClassDefinition.MethodInfo(
+                    dd.identifier().getText(), new ArrayList<>(),
+                    null, vis, null, classDef.getName()));
         }
     }
 
     // ================================================================
-    // PROCEDURE / FUNCTION DECLARATIONS
+    // PROCEDURE / FUNCTION / METHOD DECLARATIONS
     // ================================================================
 
     @Override
@@ -184,39 +142,23 @@ public class DelphiVisitor extends delphiBaseVisitor<Object> {
     public Object visitProcedureOrFunctionDeclaration(
             delphiParser.ProcedureOrFunctionDeclarationContext ctx) {
         if (ctx.procedureDeclaration() != null) {
-            registerProc(ctx);
+            functions.put(ctx.procedureDeclaration().identifier().getText().toLowerCase(), ctx);
         } else if (ctx.functionDeclaration() != null) {
-            registerProc(ctx);
+            functions.put(ctx.functionDeclaration().identifier().getText().toLowerCase(), ctx);
         } else if (ctx.constructorImplementation() != null) {
-            registerMethodImpl(ctx.constructorImplementation().identifier(0).getText(),
-                               ctx.constructorImplementation().identifier(1).getText(),
-                               ctx.constructorImplementation().formalParameterList(),
-                               ctx.constructorImplementation().block(),
-                               true, false);
+            delphiParser.ConstructorImplementationContext ci = ctx.constructorImplementation();
+            registerMethodImpl(ci.identifier(0).getText(), ci.identifier(1).getText(),
+                    ci.formalParameterList(), ci.block(), true, false);
         } else if (ctx.destructorImplementation() != null) {
-            registerMethodImpl(ctx.destructorImplementation().identifier(0).getText(),
-                               ctx.destructorImplementation().identifier(1).getText(),
-                               null,
-                               ctx.destructorImplementation().block(),
-                               false, true);
+            delphiParser.DestructorImplementationContext di = ctx.destructorImplementation();
+            registerMethodImpl(di.identifier(0).getText(), di.identifier(1).getText(),
+                    null, di.block(), false, true);
         } else if (ctx.methodImplementation() != null) {
-            registerMethodImpl(ctx.methodImplementation().identifier(0).getText(),
-                               ctx.methodImplementation().identifier(1).getText(),
-                               ctx.methodImplementation().formalParameterList(),
-                               ctx.methodImplementation().block(),
-                               false, false);
+            delphiParser.MethodImplementationContext mi = ctx.methodImplementation();
+            registerMethodImpl(mi.identifier(0).getText(), mi.identifier(1).getText(),
+                    mi.formalParameterList(), mi.block(), false, false);
         }
         return null;
-    }
-
-    private void registerProc(delphiParser.ProcedureOrFunctionDeclarationContext ctx) {
-        String name;
-        if (ctx.procedureDeclaration() != null) {
-            name = ctx.procedureDeclaration().identifier().getText();
-        } else {
-            name = ctx.functionDeclaration().identifier().getText();
-        }
-        functions.put(name.toLowerCase(), ctx);
     }
 
     private void registerMethodImpl(String className, String methodName,
@@ -224,96 +166,80 @@ public class DelphiVisitor extends delphiBaseVisitor<Object> {
                                     delphiParser.BlockContext blockCtx,
                                     boolean isCtor, boolean isDtor) {
         ClassDefinition classDef = classes.get(className.toLowerCase());
-        if (classDef == null) {
-            // Might be a forward reference; store for later
-            return;
-        }
+        if (classDef == null) return;
         List<ClassDefinition.ParameterInfo> params = parseParamList(paramCtx);
+
         if (isCtor) {
             ClassDefinition.MethodInfo ctor = classDef.getConstructor();
             if (ctor == null) {
                 ctor = new ClassDefinition.MethodInfo(methodName, params, null,
                         ClassDefinition.Visibility.PUBLIC, blockCtx, className);
                 classDef.setConstructor(ctor);
-            } else {
-                ctor.body = blockCtx;
-                ctor.params = params;
-            }
+            } else { ctor.body = blockCtx; ctor.params = params; }
         } else if (isDtor) {
             ClassDefinition.MethodInfo dtor = classDef.getDestructor();
             if (dtor == null) {
                 dtor = new ClassDefinition.MethodInfo(methodName, params, null,
                         ClassDefinition.Visibility.PUBLIC, blockCtx, className);
                 classDef.setDestructor(dtor);
-            } else {
-                dtor.body = blockCtx;
-            }
+            } else { dtor.body = blockCtx; }
         } else {
             ClassDefinition.MethodInfo method = classDef.getMethod(methodName);
             if (method == null) {
                 method = new ClassDefinition.MethodInfo(methodName, params, null,
                         ClassDefinition.Visibility.PUBLIC, blockCtx, className);
                 classDef.addMethod(method);
-            } else {
-                method.body = blockCtx;
-                method.params = params;
-            }
+            } else { method.body = blockCtx; method.params = params; }
         }
     }
 
     // ================================================================
-    // VARIABLE DECLARATIONS
+    // VARIABLE / CONSTANT DECLARATIONS
     // ================================================================
 
     @Override
     public Object visitVariableDeclarationPart(delphiParser.VariableDeclarationPartContext ctx) {
         for (delphiParser.VariableDeclarationContext vd : ctx.variableDeclaration()) {
-            for (delphiParser.IdentifierContext id : vd.identifierList().identifier()) {
-                currentEnv.define(id.getText(), defaultValue(vd.type_().getText()));
-            }
+            String typeName = vd.type_().getText();
+            for (delphiParser.IdentifierContext id : vd.identifierList().identifier())
+                currentEnv.define(id.getText(), defaultValue(typeName));
         }
         return null;
     }
 
-    private Object defaultValue(String typeName) {
-        String t = typeName.toLowerCase();
-        if (t.equals("integer") || t.equals("int")) return 0;
-        if (t.equals("real")) return 0.0;
-        if (t.equals("boolean")) return false;
-        if (t.equals("string")) return "";
-        if (t.equals("char")) return '\0';
-        return null;
+    private Object defaultValue(String t) {
+        switch (t.toLowerCase()) {
+            case "integer": case "int": return 0;
+            case "real":    return 0.0;
+            case "boolean": return false;
+            case "string":  return "";
+            case "char":    return '\0';
+            default:        return null;
+        }
     }
-
-    // ================================================================
-    // CONSTANT DEFINITIONS
-    // ================================================================
 
     @Override
     public Object visitConstantDefinitionPart(delphiParser.ConstantDefinitionPartContext ctx) {
-        for (delphiParser.ConstantDefinitionContext cd : ctx.constantDefinition()) {
-            String name = cd.identifier().getText();
-            Object val = visit(cd.constant());
-            currentEnv.define(name, val);
-        }
+        for (delphiParser.ConstantDefinitionContext cd : ctx.constantDefinition())
+            currentEnv.define(cd.identifier().getText(), visit(cd.constant()));
         return null;
     }
 
     @Override
     public Object visitConstant(delphiParser.ConstantContext ctx) {
-        if (ctx.unsignedNumber() != null) return visit(ctx.unsignedNumber());
-        if (ctx.string() != null) return visit(ctx.string());
-        if (ctx.identifier() != null) return currentEnv.get(ctx.identifier().getText());
-        if (ctx.sign() != null) {
-            Object val = ctx.unsignedNumber() != null ? visit(ctx.unsignedNumber())
-                                                      : currentEnv.get(ctx.identifier().getText());
-            if (ctx.sign().MINUS() != null) {
-                if (val instanceof Integer) return -(Integer) val;
-                if (val instanceof Double) return -(Double) val;
-            }
-            return val;
-        }
-        return null;
+        boolean neg = ctx.sign() != null && ctx.sign().MINUS() != null;
+        Object val;
+        if      (ctx.unsignedNumber() != null) val = visit(ctx.unsignedNumber());
+        else if (ctx.string()         != null) val = visit(ctx.string());
+        else if (ctx.constantChr()    != null) val = visit(ctx.constantChr());
+        else if (ctx.identifier()     != null) val = currentEnv.get(ctx.identifier().getText());
+        else return null;
+        return neg ? negate(val) : val;
+    }
+
+    @Override
+    public Object visitConstantChr(delphiParser.ConstantChrContext ctx) {
+        return String.valueOf((char) Integer.parseInt(ctx.unsignedInteger().NUM_INT().getText()));
     }
 
     // ================================================================
@@ -327,252 +253,362 @@ public class DelphiVisitor extends delphiBaseVisitor<Object> {
 
     @Override
     public Object visitStatements(delphiParser.StatementsContext ctx) {
-        for (delphiParser.StatementContext st : ctx.statement()) {
-            visit(st);
-        }
+        for (delphiParser.StatementContext st : ctx.statement()) visit(st);
         return null;
     }
 
     @Override
     public Object visitStatement(delphiParser.StatementContext ctx) {
-        if (ctx.simpleStatement() != null) return visit(ctx.simpleStatement());
+        if (ctx.simpleStatement()     != null) return visit(ctx.simpleStatement());
         if (ctx.structuredStatement() != null) return visit(ctx.structuredStatement());
         return null;
     }
 
+    /**
+     * simpleStatement alternatives (no labels in grammar):
+     *   1) designator ASSIGN expression
+     *   2) designator
+     *   3) GOTO label
+     * Detected by checking which tokens are present.
+     */
     @Override
     public Object visitSimpleStatement(delphiParser.SimpleStatementContext ctx) {
-        if (ctx.assignmentStatement() != null) return visit(ctx.assignmentStatement());
-        if (ctx.procedureStatement() != null) return visit(ctx.procedureStatement());
-        if (ctx.gotoStatement() != null) throw new RuntimeException("GOTO not supported");
+        if (ctx.GOTO() != null) throw new RuntimeException("GOTO not supported");
+
+        if (ctx.ASSIGN() != null) {
+            // Assignment: designator := expression
+            Object rhs = visit(ctx.expression());
+            assignDesignator(ctx.designator(), rhs);
+            return null;
+        }
+
+        // Standalone call/expression
+        evalDesignator(ctx.designator());
         return null;
     }
 
-    // ----------------------------------------------------------------
-    // Assignment
-    // ----------------------------------------------------------------
+    // ================================================================
+    // DESIGNATOR: assignment (left-hand side)
+    // ================================================================
 
-    @Override
-    public Object visitAssignmentStatement(delphiParser.AssignmentStatementContext ctx) {
-        Object rhs = visit(ctx.expression());
-        assignToVariable(ctx.variable(), rhs);
-        return null;
-    }
+    private void assignDesignator(delphiParser.DesignatorContext ctx, Object value) {
+        List<delphiParser.DesignatorSuffixContext> suffixes = ctx.designatorSuffix();
+        String baseName = ctx.primary().identifier().getText();
 
-    private void assignToVariable(delphiParser.VariableContext ctx, Object value) {
-        String baseName = (ctx.identifier() != null && !ctx.identifier().isEmpty())
-                        ? ctx.identifier().get(0).getText()
-                        : ctx.getStart().getText();
+        if (suffixes.isEmpty()) {
+            assignSimple(baseName, value);
+            return;
+        }
 
-        // Check for field access: obj.field
-        List<ParseTree> children = new ArrayList<>();
-        for (int i = 0; i < ctx.getChildCount(); i++) children.add(ctx.getChild(i));
+        // Navigate to the object holding the final field
+        Object base = evalPrimary(ctx.primary());
+        for (int i = 0; i < suffixes.size() - 1; i++)
+            base = applySuffix(base, suffixes.get(i));
 
-        // Find DOT accesses
-        if (children.size() >= 3) {
-            // Build access chain
-            Object obj = resolveVariableBase(ctx, 0);
-            // Last identifier is the target field
-            String fieldName = ctx.identifier(ctx.identifier().size() - 1).getText();
-            if (obj instanceof DelphiObject) {
-                ((DelphiObject) obj).setField(fieldName, value);
+        // Apply last suffix as write
+        delphiParser.DesignatorSuffixContext last = suffixes.get(suffixes.size() - 1);
+        if (last.DOT() != null) {
+            String field = last.identifier().getText();
+            if (base instanceof DelphiObject) {
+                ((DelphiObject) base).setField(field, value);
                 return;
             }
         }
+        // Fallback: treat as simple variable
+        assignSimple(baseName, value);
+    }
 
-        // Check if it's self.field in method context
+    private void assignSimple(String name, Object value) {
+        // Check implicit self fields first
         if (currentEnv.has("__self__")) {
             DelphiObject self = (DelphiObject) currentEnv.get("__self__");
-            if (self.hasField(baseName)) {
-                self.setField(baseName, value);
-                return;
-            }
+            if (self.hasField(name)) { self.setField(name, value); return; }
         }
-
-        currentEnv.assign(baseName, value);
+        currentEnv.assign(name, value);
     }
 
-    private Object resolveVariableBase(delphiParser.VariableContext ctx, int depth) {
-        // For multi-part variable like a.b.c, resolve prefix
-        if (ctx.identifier().size() <= 1) {
-            String name = ctx.identifier(0).getText();
-            if (name.equalsIgnoreCase("self") && currentEnv.has("__self__")) {
-                return currentEnv.get("__self__");
+    // ================================================================
+    // DESIGNATOR: read / call (right-hand side and standalone)
+    // ================================================================
+
+    private Object evalDesignator(delphiParser.DesignatorContext ctx) {
+        String name = ctx.primary().identifier().getText();
+        List<delphiParser.DesignatorSuffixContext> suffixes = ctx.designatorSuffix();
+
+        // ---- Object creation: ClassName.Create(args) ----
+        if (!suffixes.isEmpty() && suffixes.get(0).DOT() != null) {
+            String member = suffixes.get(0).identifier().getText();
+            if (member.equalsIgnoreCase("create")) {
+                ClassDefinition classDef = classes.get(name.toLowerCase());
+                if (classDef != null) {
+                    List<Object> args = new ArrayList<>();
+                    if (suffixes.size() >= 2 && suffixes.get(1).LPAREN() != null)
+                        args = evalArgList(suffixes.get(1).parameterList());
+                    return instantiateClass(classDef, args);
+                }
             }
-            return currentEnv.get(name);
         }
-        // Resolve first part, then navigate
-        String firstName = ctx.identifier(0).getText();
-        Object base;
-        if (firstName.equalsIgnoreCase("self") && currentEnv.has("__self__")) {
-            base = currentEnv.get("__self__");
-        } else {
-            base = currentEnv.get(firstName);
+
+        // ---- Single call suffix: foo(args) ----
+        if (suffixes.size() == 1 && suffixes.get(0).LPAREN() != null) {
+            List<Object> args = evalArgList(suffixes.get(0).parameterList());
+            return callNamed(name, args);
         }
-        // Navigate through intermediate dots (all except last)
-        for (int i = 1; i < ctx.identifier().size() - 1; i++) {
-            String field = ctx.identifier(i).getText();
+
+        // ---- No suffixes: plain name ----
+        if (suffixes.isEmpty()) return resolveName(name);
+
+        // ---- General chain ----
+        Object base = evalPrimary(ctx.primary());
+        for (delphiParser.DesignatorSuffixContext suffix : suffixes)
+            base = applySuffix(base, suffix);
+        return base;
+    }
+
+    /**
+     * Apply one designator suffix to 'base'.
+     */
+    private Object applySuffix(Object base, delphiParser.DesignatorSuffixContext suffix) {
+        if (suffix.DOT() != null) {
+            String member = suffix.identifier().getText();
             if (base instanceof DelphiObject) {
-                base = ((DelphiObject) base).getField(field);
-            } else {
-                throw new RuntimeException("Cannot access field '" + field + "' on non-object");
+                DelphiObject obj = (DelphiObject) base;
+                if (obj.hasField(member)) return obj.getField(member);
+                return new MethodRef(obj, member);  // defer call
             }
+            throw new RuntimeException("Cannot access '." + member + "' on: " + base);
+
+        } else if (suffix.LPAREN() != null) {
+            List<Object> args = evalArgList(suffix.parameterList());
+
+            if (base instanceof MethodRef) {
+                MethodRef ref = (MethodRef) base;
+                String lname = ref.methodName.toLowerCase();
+                if (lname.equals("free") || lname.equals("destroy")) {
+                    ClassDefinition.MethodInfo dtor = ref.obj.getClassDef().getDestructor();
+                    if (dtor != null && dtor.body != null)
+                        callMethod(ref.obj, dtor, new ArrayList<>());
+                    return null;
+                }
+                ClassDefinition.MethodInfo method = ref.obj.getClassDef().getMethod(ref.methodName);
+                if (method != null && method.body != null) return callMethod(ref.obj, method, args);
+                System.err.println("Warning: method '" + ref.methodName + "' not found or has no body");
+                return null;
+            }
+            System.err.println("Warning: call suffix on non-callable: " + base);
+            return null;
+
+        } else if (suffix.LBRACKET() != null) {
+            int idx = toInt(visit(suffix.expression(0)));
+            if (base instanceof Object[]) return ((Object[]) base)[idx];
+            throw new RuntimeException("Cannot index: " + base);
+
+        } else if (suffix.POINTER() != null) {
+            return base;
         }
         return base;
     }
 
-    // ----------------------------------------------------------------
-    // Procedure/function call statement
-    // ----------------------------------------------------------------
-
-    @Override
-    public Object visitProcedureStatement(delphiParser.ProcedureStatementContext ctx) {
-        String name = ctx.identifier().getText();
-        List<Object> args = new ArrayList<>();
-        if (ctx.parameterList() != null) {
-            for (delphiParser.ActualParameterContext ap : ctx.parameterList().actualParameter()) {
-                args.add(visit(ap.expression(0)));
-            }
-        }
-        return callBuiltinOrUserProc(name, args);
+    private Object evalPrimary(delphiParser.PrimaryContext ctx) {
+        return resolveName(ctx.identifier().getText());
     }
 
-    private Object callBuiltinOrUserProc(String name, List<Object> args) {
-        String lname = name.toLowerCase();
-
-        // Built-ins
-        if (lname.equals("writeln") || lname.equals("write")) {
-            StringBuilder sb = new StringBuilder();
-            for (Object a : args) sb.append(objectToString(a));
-            if (lname.equals("writeln")) System.out.println(sb);
-            else System.out.print(sb);
-            return null;
-        }
-        if (lname.equals("readln") || lname.equals("read")) {
-            Scanner sc = new Scanner(System.in);
-            for (Object a : args) {
-                // We expect variable names... but in expression form we already evaluated.
-                // For simplicity just read and ignore assignment here (handled via assign stmt)
-            }
-            return null;
-        }
-
-        // User-defined procedure/function
-        if (functions.containsKey(lname)) {
-            return callUserFunction(functions.get(lname), args);
-        }
-
-        // Check if it's a method call on self
+    private Object resolveName(String name) {
+        if (name.equalsIgnoreCase("self") && currentEnv.has("__self__"))
+            return currentEnv.get("__self__");
+        if (currentEnv.has(name)) return currentEnv.get(name);
         if (currentEnv.has("__self__")) {
             DelphiObject self = (DelphiObject) currentEnv.get("__self__");
-            ClassDefinition.MethodInfo method = self.getClassDef().getMethod(name);
-            if (method != null && method.body != null) {
-                return callMethod(self, method, args);
-            }
+            if (self.hasField(name)) return self.getField(name);
         }
-
-        // Destructor call: obj.Free
-        if (lname.equals("free")) {
-            return null; // no-op in our interpreter
-        }
-
-        System.err.println("Warning: unknown procedure '" + name + "'");
+        if (functions.containsKey(name.toLowerCase()))
+            return callUserFunction(functions.get(name.toLowerCase()), new ArrayList<>());
         return null;
     }
 
-    private String objectToString(Object o) {
+    private Object callNamed(String name, List<Object> args) {
+        Object b = callBuiltin(name, args);
+        if (b != UNRESOLVED) return b;
+        if (functions.containsKey(name.toLowerCase()))
+            return callUserFunction(functions.get(name.toLowerCase()), args);
+        if (currentEnv.has("__self__")) {
+            DelphiObject self = (DelphiObject) currentEnv.get("__self__");
+            ClassDefinition.MethodInfo method = self.getClassDef().getMethod(name);
+            if (method != null && method.body != null) return callMethod(self, method, args);
+        }
+        System.err.println("Warning: unknown function/procedure '" + name + "'");
+        return null;
+    }
+
+    private List<Object> evalArgList(delphiParser.ParameterListContext ctx) {
+        List<Object> args = new ArrayList<>();
+        if (ctx == null) return args;
+        for (delphiParser.ActualParameterContext ap : ctx.actualParameter())
+            args.add(visit(ap.expression(0)));
+        return args;
+    }
+
+    // ================================================================
+    // FACTOR (expression context)
+    // ================================================================
+
+    @Override
+    public Object visitFactor(delphiParser.FactorContext ctx) {
+        if (ctx.LPAREN() != null && ctx.expression() != null) return visit(ctx.expression());
+        if (ctx.NOT()    != null) return !isTruthy(visit(ctx.factor()));
+        if (ctx.bool_()  != null) return visit(ctx.bool_());
+        if (ctx.NIL()    != null) return null;
+        if (ctx.unsignedConstant() != null) return visit(ctx.unsignedConstant());
+        if (ctx.set_()   != null) return visit(ctx.set_());
+        if (ctx.designator() != null) return evalDesignator(ctx.designator());
+        return null;
+    }
+
+    // ================================================================
+    // BUILT-IN FUNCTIONS / PROCEDURES
+    // ================================================================
+
+    private Object callBuiltin(String name, List<Object> args) {
+        switch (name.toLowerCase()) {
+            case "writeln": {
+                StringBuilder sb = new StringBuilder();
+                for (Object a : args) sb.append(fmt(a));
+                System.out.println(sb);
+                return null;
+            }
+            case "write": {
+                StringBuilder sb = new StringBuilder();
+                for (Object a : args) sb.append(fmt(a));
+                System.out.print(sb);
+                return null;
+            }
+            case "readln": { Scanner sc = new Scanner(System.in); return sc.nextLine(); }
+            case "read":   { Scanner sc = new Scanner(System.in); return sc.nextLine(); }
+            case "inttostr":   return args.isEmpty() ? "" : String.valueOf(toInt(args.get(0)));
+            case "strtoint":   return args.isEmpty() ? 0 : Integer.parseInt(args.get(0).toString().trim());
+            case "length":     return args.isEmpty() ? 0 : args.get(0).toString().length();
+            case "copy": {
+                if (args.size() >= 3) {
+                    String s = args.get(0).toString();
+                    int from = Math.max(0, toInt(args.get(1)) - 1);
+                    int len  = toInt(args.get(2));
+                    return s.substring(from, Math.min(from + len, s.length()));
+                }
+                return "";
+            }
+            case "pos": {
+                if (args.size() >= 2) {
+                    int idx = args.get(1).toString().indexOf(args.get(0).toString());
+                    return idx < 0 ? 0 : idx + 1;
+                }
+                return 0;
+            }
+            case "upcase": case "uppercase":
+                return args.isEmpty() ? "" : args.get(0).toString().toUpperCase();
+            case "lowercase":
+                return args.isEmpty() ? "" : args.get(0).toString().toLowerCase();
+            case "abs":
+                if (!args.isEmpty()) {
+                    Object v = args.get(0);
+                    return v instanceof Double ? Math.abs((Double) v) : Math.abs(toInt(v));
+                }
+                return 0;
+            case "sqr":  { double v = args.isEmpty() ? 0 : toDouble(args.get(0)); return v * v; }
+            case "sqrt": return args.isEmpty() ? 0.0 : Math.sqrt(toDouble(args.get(0)));
+            case "trunc":return args.isEmpty() ? 0 : (int) toDouble(args.get(0));
+            case "round":return args.isEmpty() ? 0 : (int) Math.round(toDouble(args.get(0)));
+            case "odd":  return !args.isEmpty() && toInt(args.get(0)) % 2 != 0;
+            case "succ": return args.isEmpty() ? 0 : toInt(args.get(0)) + 1;
+            case "pred": return args.isEmpty() ? 0 : toInt(args.get(0)) - 1;
+            case "ord":
+                if (!args.isEmpty()) {
+                    Object v = args.get(0);
+                    if (v instanceof Character) return (int)(Character) v;
+                    if (v instanceof String && !((String) v).isEmpty())
+                        return (int)((String) v).charAt(0);
+                }
+                return 0;
+            case "chr":  return args.isEmpty() ? '\0' : (char) toInt(args.get(0));
+            case "str":  return args.isEmpty() ? "" : String.valueOf(args.get(0));
+            case "high": return Integer.MAX_VALUE;
+            case "low":  return Integer.MIN_VALUE;
+            case "free": case "destroy": return null;
+            default:     return UNRESOLVED;
+        }
+    }
+
+    private String fmt(Object o) {
         if (o == null) return "nil";
-        if (o instanceof Boolean) return ((Boolean) o) ? "TRUE" : "FALSE";
+        if (o instanceof Boolean) return (Boolean) o ? "TRUE" : "FALSE";
         if (o instanceof Double) {
-            Double d = (Double) o;
-            if (d == Math.floor(d)) return String.valueOf(d.intValue());
+            double d = (Double) o;
+            if (d == Math.floor(d) && !Double.isInfinite(d)) return String.valueOf((long) d);
             return String.valueOf(d);
         }
         return o.toString();
     }
 
     // ================================================================
-    // FUNCTION / METHOD CALLING
+    // FUNCTION / METHOD INVOCATION
     // ================================================================
 
-    private Object callUserFunction(delphiParser.ProcedureOrFunctionDeclarationContext ctx, List<Object> args) {
+    private Object callUserFunction(
+            delphiParser.ProcedureOrFunctionDeclarationContext ctx, List<Object> args) {
         Environment saved = currentEnv;
         Environment fnEnv = new Environment(globalEnv);
         currentEnv = fnEnv;
-
         try {
             if (ctx.procedureDeclaration() != null) {
                 delphiParser.ProcedureDeclarationContext pd = ctx.procedureDeclaration();
                 bindParams(pd.formalParameterList(), args, fnEnv);
                 visit(pd.block());
                 return null;
-            } else if (ctx.functionDeclaration() != null) {
+            } else {
                 delphiParser.FunctionDeclarationContext fd = ctx.functionDeclaration();
-                String funcName = fd.identifier().getText();
-                fnEnv.define(funcName, null);  // result variable
+                String fname = fd.identifier().getText().toLowerCase();
+                fnEnv.define(fname, null);
                 fnEnv.define("result", null);
                 bindParams(fd.formalParameterList(), args, fnEnv);
-                try {
-                    visit(fd.block());
-                } catch (ReturnException re) {
-                    return re.getValue();
-                }
-                Object result = fnEnv.get("result");
-                if (result == null) result = fnEnv.get(funcName);
-                return result;
+                try { visit(fd.block()); } catch (ReturnException re) { return re.getValue(); }
+                Object res = fnEnv.get("result");
+                if (res == null) res = fnEnv.get(fname);
+                return res;
             }
-        } finally {
-            currentEnv = saved;
-        }
-        return null;
+        } finally { currentEnv = saved; }
     }
 
     private Object callMethod(DelphiObject self, ClassDefinition.MethodInfo method, List<Object> args) {
         Environment saved = currentEnv;
-        Environment methodEnv = new Environment(globalEnv);
-        currentEnv = methodEnv;
-        methodEnv.define("__self__", self);
-        methodEnv.define("self", self);
-
+        Environment env   = new Environment(globalEnv);
+        currentEnv = env;
+        env.define("__self__", self);
+        env.define("self", self);
         try {
-            bindParamInfos(method.params, args, methodEnv);
+            bindParamInfos(method.params, args, env);
             if (method.returnType != null) {
-                methodEnv.define("result", null);
-                methodEnv.define(method.name.toLowerCase(), null);
+                env.define("result", defaultValue(method.returnType));
+                env.define(method.name.toLowerCase(), null);
             }
-            if (method.body != null) {
-                try {
-                    visitBlock((delphiParser.BlockContext) method.body);
-                } catch (ReturnException re) {
-                    return re.getValue();
-                }
-            }
-            if (method.returnType != null) {
-                Object res = methodEnv.get("result");
-                return res;
-            }
-        } finally {
-            currentEnv = saved;
-        }
-        return null;
+            if (method.body != null)
+                try { visitBlock((delphiParser.BlockContext) method.body); }
+                catch (ReturnException re) { return re.getValue(); }
+            return method.returnType != null ? env.get("result") : null;
+        } finally { currentEnv = saved; }
     }
 
-    private void bindParams(delphiParser.FormalParameterListContext ctx, List<Object> args, Environment env) {
-        if (ctx == null) return;
-        List<ClassDefinition.ParameterInfo> params = parseParamList(ctx);
-        bindParamInfos(params, args, env);
+    private void bindParams(delphiParser.FormalParameterListContext ctx,
+                            List<Object> args, Environment env) {
+        bindParamInfos(parseParamList(ctx), args, env);
     }
 
-    private void bindParamInfos(List<ClassDefinition.ParameterInfo> params, List<Object> args, Environment env) {
-        int i = 0;
-        for (ClassDefinition.ParameterInfo p : params) {
-            Object val = (i < args.size()) ? args.get(i) : null;
-            env.define(p.name, val);
-            i++;
-        }
+    private void bindParamInfos(List<ClassDefinition.ParameterInfo> params,
+                                 List<Object> args, Environment env) {
+        for (int i = 0; i < params.size(); i++)
+            env.define(params.get(i).name, i < args.size() ? args.get(i) : null);
     }
 
-    private List<ClassDefinition.ParameterInfo> parseParamList(delphiParser.FormalParameterListContext ctx) {
+    private List<ClassDefinition.ParameterInfo> parseParamList(
+            delphiParser.FormalParameterListContext ctx) {
         List<ClassDefinition.ParameterInfo> params = new ArrayList<>();
         if (ctx == null) return params;
         for (delphiParser.FormalParameterSectionContext fps : ctx.formalParameterSection()) {
@@ -580,11 +616,21 @@ public class DelphiVisitor extends delphiBaseVisitor<Object> {
             delphiParser.ParameterGroupContext pg = fps.parameterGroup();
             if (pg == null) continue;
             String typeName = pg.typeIdentifier().getText();
-            for (delphiParser.IdentifierContext id : pg.identifierList().identifier()) {
+            for (delphiParser.IdentifierContext id : pg.identifierList().identifier())
                 params.add(new ClassDefinition.ParameterInfo(id.getText(), typeName, isVar));
-            }
         }
         return params;
+    }
+
+    // ================================================================
+    // OBJECT INSTANTIATION
+    // ================================================================
+
+    private Object instantiateClass(ClassDefinition classDef, List<Object> args) {
+        DelphiObject obj = new DelphiObject(classDef);
+        ClassDefinition.MethodInfo ctor = classDef.getConstructor();
+        if (ctor != null && ctor.body != null) callMethod(obj, ctor, args);
+        return obj;
     }
 
     // ================================================================
@@ -593,98 +639,64 @@ public class DelphiVisitor extends delphiBaseVisitor<Object> {
 
     @Override
     public Object visitStructuredStatement(delphiParser.StructuredStatementContext ctx) {
-        if (ctx.compoundStatement() != null) return visit(ctx.compoundStatement());
+        if (ctx.compoundStatement()    != null) return visit(ctx.compoundStatement());
         if (ctx.conditionalStatement() != null) return visit(ctx.conditionalStatement());
-        if (ctx.repetetiveStatement() != null) return visit(ctx.repetetiveStatement());
-        if (ctx.withStatement() != null) return visit(ctx.withStatement());
-        if (ctx.tryStatement() != null) return visit(ctx.tryStatement());
+        if (ctx.repetetiveStatement()  != null) return visit(ctx.repetetiveStatement());
+        if (ctx.withStatement()        != null) return visit(ctx.withStatement());
+        if (ctx.tryStatement()         != null) return visit(ctx.tryStatement());
         return null;
     }
 
     @Override
     public Object visitIfStatement(delphiParser.IfStatementContext ctx) {
-        Object cond = visit(ctx.expression());
-        if (isTruthy(cond)) {
-            visit(ctx.statement(0));
-        } else if (ctx.ELSE() != null) {
-            visit(ctx.statement(1));
-        }
+        if (isTruthy(visit(ctx.expression()))) visit(ctx.statement(0));
+        else if (ctx.ELSE() != null)           visit(ctx.statement(1));
         return null;
     }
 
     @Override
     public Object visitWhileStatement(delphiParser.WhileStatementContext ctx) {
-        while (isTruthy(visit(ctx.expression()))) {
-            visit(ctx.statement());
-        }
+        while (isTruthy(visit(ctx.expression()))) visit(ctx.statement());
         return null;
     }
 
     @Override
     public Object visitRepeatStatement(delphiParser.RepeatStatementContext ctx) {
-        do {
-            visit(ctx.statements());
-        } while (!isTruthy(visit(ctx.expression())));
+        do { visit(ctx.statements()); } while (!isTruthy(visit(ctx.expression())));
         return null;
     }
 
     @Override
     public Object visitForStatement(delphiParser.ForStatementContext ctx) {
-        String varName = ctx.identifier().getText();
-        int start = toInt(visit(ctx.forList().initialValue().expression()));
-        int end = toInt(visit(ctx.forList().finalValue().expression()));
-        boolean downto = ctx.forList().DOWNTO() != null;
-
-        if (!downto) {
-            for (int i = start; i <= end; i++) {
-                currentEnv.assign(varName, i);
-                visit(ctx.statement());
-            }
-        } else {
-            for (int i = start; i >= end; i--) {
-                currentEnv.assign(varName, i);
-                visit(ctx.statement());
-            }
-        }
+        String var  = ctx.identifier().getText();
+        int    from = toInt(visit(ctx.forList().initialValue().expression()));
+        int    to   = toInt(visit(ctx.forList().finalValue().expression()));
+        boolean dn  = ctx.forList().DOWNTO() != null;
+        if (!dn) for (int i = from; i <= to; i++) { currentEnv.assign(var, i); visit(ctx.statement()); }
+        else     for (int i = from; i >= to; i--) { currentEnv.assign(var, i); visit(ctx.statement()); }
         return null;
     }
 
     @Override
     public Object visitCaseStatement(delphiParser.CaseStatementContext ctx) {
         Object val = visit(ctx.expression());
-        for (delphiParser.CaseListElementContext elem : ctx.caseListElement()) {
-            for (delphiParser.ConstantContext c : elem.constList().constant()) {
-                Object constVal = visit(c);
-                if (equal(val, constVal)) {
-                    visit(elem.statement());
-                    return null;
-                }
-            }
-        }
-        // ELSE branch
+        for (delphiParser.CaseListElementContext elem : ctx.caseListElement())
+            for (delphiParser.ConstantContext c : elem.constList().constant())
+                if (equal(val, visit(c))) { visit(elem.statement()); return null; }
         if (ctx.statements() != null) visit(ctx.statements());
         return null;
     }
 
     @Override
     public Object visitTryStatement(delphiParser.TryStatementContext ctx) {
-        try {
-            visit(ctx.statements());
-        } catch (Exception e) {
-            if (ctx.exceptBlock() != null) {
-                visit(ctx.exceptBlock());
-            }
-        } finally {
-            if (ctx.finallyBlock() != null) {
-                visit(ctx.finallyBlock());
-            }
-        }
+        try     { visit(ctx.statements()); }
+        catch (Exception e) { if (ctx.exceptBlock()  != null) visit(ctx.exceptBlock()); }
+        finally             { if (ctx.finallyBlock() != null) visit(ctx.finallyBlock()); }
         return null;
     }
 
     @Override
     public Object visitWithStatement(delphiParser.WithStatementContext ctx) {
-        // Execute statement in context of record variable
         return visit(ctx.statement());
     }
 
@@ -697,15 +709,13 @@ public class DelphiVisitor extends delphiBaseVisitor<Object> {
         Object left = visit(ctx.simpleExpression(0));
         if (ctx.relationalOperator() == null) return left;
         Object right = visit(ctx.simpleExpression(1));
-        String op = ctx.relationalOperator().getText();
-        switch (op) {
+        switch (ctx.relationalOperator().getText()) {
             case "=":  return equal(left, right);
             case "<>": return !equal(left, right);
             case "<":  return compare(left, right) < 0;
             case "<=": return compare(left, right) <= 0;
             case ">":  return compare(left, right) > 0;
             case ">=": return compare(left, right) >= 0;
-            case "is": return isInstance(left, right);
             default:   return false;
         }
     }
@@ -713,17 +723,14 @@ public class DelphiVisitor extends delphiBaseVisitor<Object> {
     @Override
     public Object visitSimpleExpression(delphiParser.SimpleExpressionContext ctx) {
         Object result = visit(ctx.term(0));
-        if (ctx.sign() != null && ctx.sign().MINUS() != null) {
-            result = negate(result);
-        }
+        if (ctx.sign() != null && ctx.sign().MINUS() != null) result = negate(result);
         for (int i = 0; i < ctx.additiveOperator().size(); i++) {
             Object right = visit(ctx.term(i + 1));
-            String op = ctx.additiveOperator(i).getText().toLowerCase();
-            switch (op) {
-                case "+": result = add(result, right); break;
-                case "-": result = subtract(result, right); break;
-                case "or": result = (Boolean) toBoolean(result) || (Boolean) toBoolean(right); break;
-                case "xor": result = (Boolean) toBoolean(result) ^ (Boolean) toBoolean(right); break;
+            switch (ctx.additiveOperator(i).getText().toLowerCase()) {
+                case "+":   result = add(result, right); break;
+                case "-":   result = subtract(result, right); break;
+                case "or":  result = isTruthy(result) || isTruthy(right); break;
+                case "xor": result = isTruthy(result) ^  isTruthy(right); break;
             }
         }
         return result;
@@ -734,13 +741,12 @@ public class DelphiVisitor extends delphiBaseVisitor<Object> {
         Object result = visit(ctx.signedFactor(0));
         for (int i = 0; i < ctx.multiplicativeOperator().size(); i++) {
             Object right = visit(ctx.signedFactor(i + 1));
-            String op = ctx.multiplicativeOperator(i).getText().toLowerCase();
-            switch (op) {
-                case "*": result = multiply(result, right); break;
-                case "/": result = divide(result, right); break;
-                case "div": result = intDivide(result, right); break;
-                case "mod": result = mod(result, right); break;
-                case "and": result = (Boolean) toBoolean(result) && (Boolean) toBoolean(right); break;
+            switch (ctx.multiplicativeOperator(i).getText().toLowerCase()) {
+                case "*":   result = multiply(result, right); break;
+                case "/":   result = divide(result, right);   break;
+                case "div": result = intDivide(result, right);break;
+                case "mod": result = mod(result, right);      break;
+                case "and": result = isTruthy(result) && isTruthy(right); break;
                 case "shl": result = toInt(result) << toInt(right); break;
                 case "shr": result = toInt(result) >> toInt(right); break;
             }
@@ -751,287 +757,24 @@ public class DelphiVisitor extends delphiBaseVisitor<Object> {
     @Override
     public Object visitSignedFactor(delphiParser.SignedFactorContext ctx) {
         Object val = visit(ctx.factor());
-        if (ctx.sign() != null && ctx.sign().MINUS() != null) {
-            return negate(val);
-        }
-        return val;
-    }
-
-    @Override
-    public Object visitFactor(delphiParser.FactorContext ctx) {
-        if (ctx.variable() != null) return visitVariableExpression(ctx.variable());
-        if (ctx.LPAREN() != null) return visit(ctx.expression());
-        if (ctx.functionDesignator() != null) return visit(ctx.functionDesignator());
-        if (ctx.unsignedConstant() != null) return visit(ctx.unsignedConstant());
-        if (ctx.NOT() != null) return !isTruthy(visit(ctx.factor()));
-        if (ctx.bool_() != null) return visit(ctx.bool_());
-        if (ctx.NIL() != null) return null;
-        if (ctx.objectCreation() != null) return visit(ctx.objectCreation());
-        return null;
-    }
-
-    /** Variable access — resolves field chains like obj.field or self.field */
-    private Object visitVariableExpression(delphiParser.VariableContext ctx) {
-        List<delphiParser.IdentifierContext> ids = ctx.identifier();
-        if (ids.isEmpty()) return null;
-
-        String first = ids.get(0).getText();
-
-        // Single identifier
-        if (ids.size() == 1 && ctx.getChildCount() == 1) {
-            // Check self fields first
-            if (currentEnv.has("__self__")) {
-                DelphiObject self = (DelphiObject) currentEnv.get("__self__");
-                if (self.hasField(first)) return self.getField(first);
-            }
-            if (currentEnv.has(first)) return currentEnv.get(first);
-            // Maybe it's a class name for static access
-            return null;
-        }
-
-        // Multi-part: resolve step by step
-        Object base;
-        if (first.equalsIgnoreCase("self") && currentEnv.has("__self__")) {
-            base = currentEnv.get("__self__");
-        } else if (currentEnv.has(first)) {
-            base = currentEnv.get(first);
-        } else {
-            return null;
-        }
-
-        for (int i = 1; i < ctx.getChildCount(); i++) {
-            ParseTree child = ctx.getChild(i);
-            String childText = child.getText();
-            if (childText.equals(".")) {
-                i++;
-                if (i < ctx.getChildCount()) {
-                    String field = ctx.getChild(i).getText();
-                    if (base instanceof DelphiObject) {
-                        DelphiObject obj = (DelphiObject) base;
-                        // Check if it's a method call or field
-                        if (obj.hasField(field)) {
-                            base = obj.getField(field);
-                        } else {
-                            // Could be a method — will be called in functionDesignator
-                            // For now return the object and method name pair
-                            return new MethodCallRef(obj, field);
-                        }
-                    }
-                }
-            }
-        }
-        return base;
-    }
-
-    /** Temporary holder for obj.method reference before call */
-    private static class MethodCallRef {
-        final DelphiObject obj;
-        final String methodName;
-        MethodCallRef(DelphiObject obj, String methodName) {
-            this.obj = obj;
-            this.methodName = methodName;
-        }
-    }
-
-    @Override
-    public Object visitFunctionDesignator(delphiParser.FunctionDesignatorContext ctx) {
-        String name = ctx.identifier().getText();
-        List<Object> args = new ArrayList<>();
-        if (ctx.parameterList() != null) {
-            for (delphiParser.ActualParameterContext ap : ctx.parameterList().actualParameter()) {
-                args.add(visit(ap.expression(0)));
-            }
-        }
-        return callFunction(name, args);
-    }
-
-    private Object callFunction(String name, List<Object> args) {
-        String lname = name.toLowerCase();
-
-        // Built-in functions
-        switch (lname) {
-            case "writeln":
-            case "write":
-                return callBuiltinOrUserProc(name, args);
-            case "readln": {
-                Scanner sc = new Scanner(System.in);
-                return sc.nextLine();
-            }
-            case "read": {
-                Scanner sc = new Scanner(System.in);
-                return sc.nextInt();
-            }
-            case "inttostr":
-                return args.isEmpty() ? "" : String.valueOf(toInt(args.get(0)));
-            case "strtoint":
-                return args.isEmpty() ? 0 : Integer.parseInt(args.get(0).toString().trim());
-            case "length":
-                return args.isEmpty() ? 0 : args.get(0).toString().length();
-            case "copy":
-                if (args.size() >= 3) {
-                    String s = args.get(0).toString();
-                    int from = toInt(args.get(1)) - 1; // Pascal 1-based
-                    int len = toInt(args.get(2));
-                    int to = Math.min(from + len, s.length());
-                    return s.substring(Math.max(0, from), to);
-                }
-                return "";
-            case "pos":
-                if (args.size() >= 2) {
-                    int idx = args.get(1).toString().indexOf(args.get(0).toString());
-                    return idx < 0 ? 0 : idx + 1;
-                }
-                return 0;
-            case "upcase":
-                return args.isEmpty() ? "" : args.get(0).toString().toUpperCase();
-            case "lowercase":
-                return args.isEmpty() ? "" : args.get(0).toString().toLowerCase();
-            case "abs":
-                if (!args.isEmpty()) {
-                    Object v = args.get(0);
-                    if (v instanceof Double) return Math.abs((Double) v);
-                    return Math.abs(toInt(v));
-                }
-                return 0;
-            case "sqr":
-                if (!args.isEmpty()) {
-                    double v = toDouble(args.get(0));
-                    return v * v;
-                }
-                return 0.0;
-            case "sqrt":
-                return args.isEmpty() ? 0.0 : Math.sqrt(toDouble(args.get(0)));
-            case "trunc":
-                return args.isEmpty() ? 0 : (int) toDouble(args.get(0));
-            case "round":
-                return args.isEmpty() ? 0 : (int) Math.round(toDouble(args.get(0)));
-            case "odd":
-                return !args.isEmpty() && toInt(args.get(0)) % 2 != 0;
-            case "succ":
-                return args.isEmpty() ? 0 : toInt(args.get(0)) + 1;
-            case "pred":
-                return args.isEmpty() ? 0 : toInt(args.get(0)) - 1;
-            case "ord":
-                if (!args.isEmpty()) {
-                    Object v = args.get(0);
-                    if (v instanceof Character) return (int) (Character) v;
-                    if (v instanceof String && !((String) v).isEmpty()) return (int) ((String) v).charAt(0);
-                }
-                return 0;
-            case "chr":
-                return args.isEmpty() ? '\0' : (char) toInt(args.get(0));
-            case "str":
-                return args.isEmpty() ? "" : String.valueOf(args.get(0));
-            case "high":
-                return Integer.MAX_VALUE;
-            case "low":
-                return Integer.MIN_VALUE;
-        }
-
-        // User-defined function
-        if (functions.containsKey(lname)) {
-            return callUserFunction(functions.get(lname), args);
-        }
-
-        // Method on self
-        if (currentEnv.has("__self__")) {
-            DelphiObject self = (DelphiObject) currentEnv.get("__self__");
-            ClassDefinition.MethodInfo method = self.getClassDef().getMethod(name);
-            if (method != null && method.body != null) {
-                return callMethod(self, method, args);
-            }
-        }
-
-        System.err.println("Warning: unknown function '" + name + "'");
-        return null;
+        return (ctx.sign() != null && ctx.sign().MINUS() != null) ? negate(val) : val;
     }
 
     // ================================================================
-    // OBJECT CREATION
-    // ================================================================
-
-    @Override
-    public Object visitObjectCreation(delphiParser.ObjectCreationContext ctx) {
-        String className;
-        List<Object> args = new ArrayList<>();
-
-        if (ctx.NEW() != null) {
-            className = ctx.identifier().getText();
-        } else {
-            // ClassName.Create(...)
-            className = ctx.identifier().getText();
-        }
-
-        if (ctx.parameterList() != null) {
-            for (delphiParser.ActualParameterContext ap : ctx.parameterList().actualParameter()) {
-                args.add(visit(ap.expression(0)));
-            }
-        }
-
-        return instantiateClass(className, args);
-    }
-
-    private Object instantiateClass(String className, List<Object> args) {
-        ClassDefinition classDef = classes.get(className.toLowerCase());
-        if (classDef == null) {
-            throw new RuntimeException("Unknown class: " + className);
-        }
-        DelphiObject obj = new DelphiObject(classDef);
-        // Call constructor if present
-        ClassDefinition.MethodInfo ctor = classDef.getConstructor();
-        if (ctor != null && ctor.body != null) {
-            callMethod(obj, ctor, args);
-        }
-        return obj;
-    }
-
-    // ================================================================
-    // COMPLEX VARIABLE / METHOD ACCESS IN PROCEDURE STATEMENTS
-    // ================================================================
-
-    /**
-     * Override visitProcedureStatement to handle method calls like obj.Method(args)
-     * This is a simplistic approach — we check for dot-access in the call.
-     */
-    // We override visitStatement to intercept method calls expressed as statements
-    // The grammar already handles this via variable (dot-chain) in assignmentStatement
-    // and via procedureStatement for top-level calls.
-    // For method calls like obj.DoSomething(), they appear as procedureStatement
-    // but with a plain identifier. We'll detect them via the variable form.
-
-    // ================================================================
-    // EXTENDED CALL HANDLING FOR obj.Method(...)
-    // ================================================================
-
-    // We need to handle compound statements like: person.SetAge(25);
-    // These are parsed differently. Let's override visitProcedureStatement to
-    // detect dot-chains stored in the variable rule.
-
-    // Actually in our grammar, "procedureStatement" only has an identifier.
-    // Calls like obj.Method() would need to be parsed differently.
-    // We'll handle it by checking assignmentStatement for the := operator,
-    // and for method call statements we parse variable DOT identifier.
-
-    // For this implementation, let's handle it by intercepting at statement level.
-    // The grammar as written may not capture obj.Method() as a procedureStatement.
-    // We'll add a workaround in visitVariable for MethodCallRef.
-
-    // ================================================================
-    // LITERALS / CONSTANTS
+    // LITERALS
     // ================================================================
 
     @Override
     public Object visitUnsignedConstant(delphiParser.UnsignedConstantContext ctx) {
         if (ctx.unsignedNumber() != null) return visit(ctx.unsignedNumber());
-        if (ctx.string() != null) return visit(ctx.string());
-        if (ctx.NIL() != null) return null;
+        if (ctx.string()         != null) return visit(ctx.string());
         return null;
     }
 
     @Override
     public Object visitUnsignedNumber(delphiParser.UnsignedNumberContext ctx) {
         if (ctx.unsignedInteger() != null) return visit(ctx.unsignedInteger());
-        if (ctx.unsignedReal() != null) return visit(ctx.unsignedReal());
+        if (ctx.unsignedReal()    != null) return visit(ctx.unsignedReal());
         return 0;
     }
 
@@ -1048,10 +791,7 @@ public class DelphiVisitor extends delphiBaseVisitor<Object> {
     @Override
     public Object visitString(delphiParser.StringContext ctx) {
         String raw = ctx.STRING_LITERAL().getText();
-        // Strip surrounding quotes and unescape ''
-        raw = raw.substring(1, raw.length() - 1);
-        raw = raw.replace("''", "'");
-        return raw;
+        return raw.substring(1, raw.length() - 1).replace("''", "'");
     }
 
     @Override
@@ -1060,101 +800,74 @@ public class DelphiVisitor extends delphiBaseVisitor<Object> {
     }
 
     // ================================================================
-    // ARITHMETIC HELPERS
+    // ARITHMETIC / COMPARISON HELPERS
     // ================================================================
 
     private Object add(Object a, Object b) {
-        if (a instanceof String || b instanceof String) {
-            return objectToString(a) + objectToString(b);
-        }
-        if (a instanceof Double || b instanceof Double) {
-            return toDouble(a) + toDouble(b);
-        }
+        if (a instanceof String || b instanceof String) return fmt(a) + fmt(b);
+        if (a instanceof Double || b instanceof Double) return toDouble(a) + toDouble(b);
         return toInt(a) + toInt(b);
     }
-
     private Object subtract(Object a, Object b) {
         if (a instanceof Double || b instanceof Double) return toDouble(a) - toDouble(b);
         return toInt(a) - toInt(b);
     }
-
     private Object multiply(Object a, Object b) {
         if (a instanceof Double || b instanceof Double) return toDouble(a) * toDouble(b);
         return toInt(a) * toInt(b);
     }
-
-    private Object divide(Object a, Object b) {
-        return toDouble(a) / toDouble(b);
-    }
-
-    private Object intDivide(Object a, Object b) {
-        return toInt(a) / toInt(b);
-    }
-
-    private Object mod(Object a, Object b) {
-        return toInt(a) % toInt(b);
-    }
-
+    private Object divide(Object a, Object b)    { return toDouble(a) / toDouble(b); }
+    private Object intDivide(Object a, Object b) { return toInt(a) / toInt(b); }
+    private Object mod(Object a, Object b)       { return toInt(a) % toInt(b); }
     private Object negate(Object a) {
         if (a instanceof Double) return -(Double) a;
         return -toInt(a);
     }
-
     private boolean equal(Object a, Object b) {
         if (a == null && b == null) return true;
         if (a == null || b == null) return false;
-        if (a instanceof Number && b instanceof Number) {
-            return toDouble(a) == toDouble(b);
-        }
+        if (a instanceof Number && b instanceof Number) return toDouble(a) == toDouble(b);
         return a.equals(b);
     }
-
     private int compare(Object a, Object b) {
-        if (a instanceof Number && b instanceof Number) {
-            return Double.compare(toDouble(a), toDouble(b));
-        }
+        if (a instanceof Number && b instanceof Number) return Double.compare(toDouble(a), toDouble(b));
         return a.toString().compareTo(b.toString());
     }
-
-    private boolean isInstance(Object obj, Object typeObj) {
-        if (obj instanceof DelphiObject && typeObj instanceof String) {
-            return ((DelphiObject) obj).getClassDef().getName().equalsIgnoreCase((String) typeObj);
-        }
-        return false;
-    }
-
     private boolean isTruthy(Object val) {
-        if (val == null) return false;
+        if (val == null)            return false;
         if (val instanceof Boolean) return (Boolean) val;
         if (val instanceof Integer) return (Integer) val != 0;
-        if (val instanceof Double) return (Double) val != 0.0;
-        if (val instanceof String) return !((String) val).isEmpty();
+        if (val instanceof Double)  return (Double)  val != 0.0;
+        if (val instanceof String)  return !((String) val).isEmpty();
         return true;
     }
-
     private int toInt(Object val) {
-        if (val == null) return 0;
+        if (val == null)            return 0;
         if (val instanceof Integer) return (Integer) val;
-        if (val instanceof Double) return ((Double) val).intValue();
+        if (val instanceof Double)  return ((Double) val).intValue();
         if (val instanceof Boolean) return (Boolean) val ? 1 : 0;
-        if (val instanceof String) {
-            try { return Integer.parseInt(((String) val).trim()); } catch (NumberFormatException e) { return 0; }
-        }
+        if (val instanceof String)  { try { return Integer.parseInt(((String) val).trim()); } catch (NumberFormatException e) { return 0; } }
         return 0;
     }
-
     private double toDouble(Object val) {
-        if (val == null) return 0.0;
-        if (val instanceof Double) return (Double) val;
+        if (val == null)            return 0.0;
+        if (val instanceof Double)  return (Double) val;
         if (val instanceof Integer) return ((Integer) val).doubleValue();
         if (val instanceof Boolean) return (Boolean) val ? 1.0 : 0.0;
-        if (val instanceof String) {
-            try { return Double.parseDouble((String) val); } catch (NumberFormatException e) { return 0.0; }
-        }
+        if (val instanceof String)  { try { return Double.parseDouble((String) val); } catch (NumberFormatException e) { return 0.0; } }
         return 0.0;
     }
 
-    private Object toBoolean(Object val) {
-        return isTruthy(val);
+    // ================================================================
+    // MethodRef — holds obj + method name until call suffix is applied
+    // ================================================================
+
+    private static class MethodRef {
+        final DelphiObject obj;
+        final String methodName;
+        MethodRef(DelphiObject obj, String methodName) {
+            this.obj = obj;
+            this.methodName = methodName;
+        }
     }
 }

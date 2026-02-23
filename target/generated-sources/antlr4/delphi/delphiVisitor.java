@@ -401,35 +401,23 @@ public interface delphiVisitor<T> extends ParseTreeVisitor<T> {
 	 */
 	T visitSimpleStatement(delphiParser.SimpleStatementContext ctx);
 	/**
-	 * Visit a parse tree produced by {@link delphiParser#assignmentStatement}.
+	 * Visit a parse tree produced by {@link delphiParser#designator}.
 	 * @param ctx the parse tree
 	 * @return the visitor result
 	 */
-	T visitAssignmentStatement(delphiParser.AssignmentStatementContext ctx);
+	T visitDesignator(delphiParser.DesignatorContext ctx);
 	/**
-	 * Visit a parse tree produced by {@link delphiParser#variable}.
+	 * Visit a parse tree produced by {@link delphiParser#primary}.
 	 * @param ctx the parse tree
 	 * @return the visitor result
 	 */
-	T visitVariable(delphiParser.VariableContext ctx);
+	T visitPrimary(delphiParser.PrimaryContext ctx);
 	/**
-	 * Visit a parse tree produced by {@link delphiParser#procedureStatement}.
+	 * Visit a parse tree produced by {@link delphiParser#designatorSuffix}.
 	 * @param ctx the parse tree
 	 * @return the visitor result
 	 */
-	T visitProcedureStatement(delphiParser.ProcedureStatementContext ctx);
-	/**
-	 * Visit a parse tree produced by {@link delphiParser#gotoStatement}.
-	 * @param ctx the parse tree
-	 * @return the visitor result
-	 */
-	T visitGotoStatement(delphiParser.GotoStatementContext ctx);
-	/**
-	 * Visit a parse tree produced by {@link delphiParser#emptyStatement_}.
-	 * @param ctx the parse tree
-	 * @return the visitor result
-	 */
-	T visitEmptyStatement_(delphiParser.EmptyStatement_Context ctx);
+	T visitDesignatorSuffix(delphiParser.DesignatorSuffixContext ctx);
 	/**
 	 * Visit a parse tree produced by {@link delphiParser#structuredStatement}.
 	 * @param ctx the parse tree
@@ -593,23 +581,11 @@ public interface delphiVisitor<T> extends ParseTreeVisitor<T> {
 	 */
 	T visitFactor(delphiParser.FactorContext ctx);
 	/**
-	 * Visit a parse tree produced by {@link delphiParser#objectCreation}.
-	 * @param ctx the parse tree
-	 * @return the visitor result
-	 */
-	T visitObjectCreation(delphiParser.ObjectCreationContext ctx);
-	/**
 	 * Visit a parse tree produced by {@link delphiParser#bool_}.
 	 * @param ctx the parse tree
 	 * @return the visitor result
 	 */
 	T visitBool_(delphiParser.Bool_Context ctx);
-	/**
-	 * Visit a parse tree produced by {@link delphiParser#functionDesignator}.
-	 * @param ctx the parse tree
-	 * @return the visitor result
-	 */
-	T visitFunctionDesignator(delphiParser.FunctionDesignatorContext ctx);
 	/**
 	 * Visit a parse tree produced by {@link delphiParser#unsignedConstant}.
 	 * @param ctx the parse tree
